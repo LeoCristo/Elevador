@@ -37,6 +37,7 @@ TaskHandle_t task3Handle = NULL;
 // Handle para a fila
 QueueHandle_t xQueueRx;
 QueueHandle_t xQueueTx;
+QueueHandle_t xQueueMensagens;
 
 //Status da porta 
 #define FECHADA 0
@@ -58,6 +59,15 @@ int volatile statusElevador = PARADO;
 #define STATUS_ANDAR 3
 #define STATUS_PORTA 4
 
+//Status chamando Andar
+#define NAO_CHAMANDO -1
+
+//Status da requisição de andar
+#define SEM_REQUISICAO 1
+#define EM_ANDAMENTO 0
+
+//Andar atual do elevador
+volatile static int andarAtual = 0; 
 
 void SerialTask(void *parameter) {
 
@@ -139,10 +149,11 @@ void SendElevatorCommandTask(void *parameter){
         ***/
 
         int tamanahoComando = strlen(receivedCommand);
-        char *sendCommand = (char *)pvPortMalloc(10 * sizeof(char));
+        //char *sendCommand = (char *)pvPortMalloc(10 * sizeof(char));
+        int sendAndar; //Andar solicitado, tanto externamente ou internamente na cabine
         //Váriaveis de status do elevador
         int botoesInternosCabine; //Botão interno pressionado na cabine
-        volatile static int andarAtual = 0; // Andar atual do elevador
+        //volatile static int andarAtual = 0; // Andar atual do elevador
         int porta; //Status da porta, pode estar fechada ou aberta
         volatile static int andarChamandoElevador = -1; // Andar em que alguém está requisitando o elevador para subir ou descer
         int tipoMensagem; //Tipo da mensagem recebida, possibilidades -> botao de subida/descida pressionadao (Ex>eE10s)->Botão interno pressionado(Ex>eIa)
@@ -180,7 +191,7 @@ void SendElevatorCommandTask(void *parameter){
               if(receivedCommand[4] == 'd'){//Descida
                 
                 andarChamandoElevador = (receivedCommand[2]-48)*10+(receivedCommand[3]-48);
-                Serial.printf("%i",andarChamandoElevador);
+                //Serial.printf("%i",andarChamandoElevador);
                 tipoMensagem = BTN_DESCIDA;
               }
             }
@@ -193,14 +204,15 @@ void SendElevatorCommandTask(void *parameter){
               /* PASS */
               break;
             case STATUS_ANDAR:
-              if(andarChamandoElevador != -1){
+              /* 
+              if(andarChamandoElevador != NAO_CHAMANDO){
                 difAndar =  andarAtual - andarChamandoElevador;//Quantidade de andares faltantes
                 Serial.printf("andarAtual %i andarChamandoElevador %i \n", andarAtual, andarChamandoElevador);
                 Serial.printf("dif %i \n",difAndar);
                 if(difAndar == 0){
                   //Enviar comando de parada
                   strcpy(sendCommand, "er\r");
-                  andarChamandoElevador = -1;
+                  andarChamandoElevador = NAO_CHAMANDO;
                   statusElevador = PARADO;
                 }else{
                   if(difAndar>0){
@@ -219,16 +231,18 @@ void SendElevatorCommandTask(void *parameter){
                   }
                 }
               }
+              */
               
               break;
             case BTN_SUBIDA:
-               if(andarChamandoElevador != -1){
+            /*
+               if(andarChamandoElevador != NAO_CHAMANDO){
                 difAndar =  andarAtual - andarChamandoElevador;//Quantidade de andares faltantes
 
                 if(difAndar == 0){
                   //Enviar comando de parada
                   strcpy(sendCommand, "er\r");
-                  andarChamandoElevador = -1;
+                  andarChamandoElevador = NAO_CHAMANDO;
                   statusElevador = PARADO;
                 }else{
                   if(difAndar>0){
@@ -247,31 +261,84 @@ void SendElevatorCommandTask(void *parameter){
                   }
                 }
               }
+              */
+              if(andarChamandoElevador != NAO_CHAMANDO){
+                sendAndar = andarChamandoElevador;
+                andarChamandoElevador = NAO_CHAMANDO;
+              }
               break;
             case BTN_DESCIDA:
-              /* PASS */
+              if(andarChamandoElevador != NAO_CHAMANDO){
+                sendAndar = andarChamandoElevador;
+                andarChamandoElevador = NAO_CHAMANDO;
+              }
               break;
             case BTN_INTERNO:
-              /* PASS */
+              sendAndar = botoesInternosCabine;
               break;
         }
+        //Só envia o andar pedido, se foi uma solicitação de andar 
+        if(tipoMensagem == BTN_SUBIDA || tipoMensagem == BTN_DESCIDA || tipoMensagem == BTN_INTERNO){
+          // Envia para a fila da task 3
+          xQueueSend(xQueueMensagens, &sendAndar, portMAX_DELAY);
+          //xQueueSend(xQueueTx, &receivedCommand, portMAX_DELAY);
 
-
-        // Envia para a fila
-        xQueueSend(xQueueTx, &sendCommand, portMAX_DELAY);
-        // Libera a memória da string recebida
+        }
+        
+        // Libera a memória da string recebida da task 1
         free(receivedCommand);
       }
   }
 }
 
-
 void CommandTask(void *parameter){
-  //Recebera as solicitações do elevador
+  //Recebera as solicitações do elevador em andares. Ex 0,1,2,...,15
+  int andarSolicitado;
+  char *sendCommand1;
+  char *sendCommand2; //= (char *)pvPortMalloc(10 * sizeof(char));
+  char *sendCommand3; //= (char *)pvPortMalloc(10 * sizeof(char));
+  int difAndar;
+
+  static int RequisiçãoAndar = SEM_REQUISICAO; // Váriavel de controle das requisições de andar
+                                               // Só podemos atender uma nova requisição de andar, se a última foi finalizada
+
   while(true){
+
+    sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
+    sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
+    sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
+
+    if (xQueueReceive(xQueueMensagens, &andarSolicitado, portMAX_DELAY) == pdPASS){
+        Serial.printf("andar %d",andarSolicitado);
+        difAndar = andarAtual - andarSolicitado;
+        if(difAndar<0){//Elevador deve fechar a porta e subir
+          strcpy(sendCommand1, "ef\r");
+          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+          strcpy(sendCommand2, "es\r");
+          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+        }
+        if(difAndar>0){//Elevador deve fehcar a porta e descer
+          strcpy(sendCommand1, "ef\r");
+          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+          strcpy(sendCommand2, "ed\r");
+          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+        }
+        if(difAndar == 0){//Elevador deve parar, abrir a porta e fechar
+          strcpy(sendCommand1, "ep\r");
+          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+          strcpy(sendCommand2, "ea\r");
+          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+          strcpy(sendCommand3, "ef\r");
+          xQueueSend(xQueueTx, &sendCommand3, portMAX_DELAY);
+        }
+        // Envia para a fila
+        //xQueueSend(xQueueTx, &sendCommand, portMAX_DELAY);
+        
+    }
     
   }
 
+ 
 }
 
 
@@ -285,9 +352,9 @@ void setup() {
    
   // Cria a fila com capacidade para 10 ponteiros para strings
   // Enfileirar quantos comandos ?
-  xQueueRx = xQueueCreate(10, sizeof(char *));
-  xQueueTx = xQueueCreate(10, sizeof(char *));
-
+  xQueueRx = xQueueCreate(10, sizeof(char *)); //Recebe as mensagens do elevador, tais como andar atual, solicitação de andar, status da porta
+  xQueueTx = xQueueCreate(10, sizeof(char *)); //Recebe os comandos a serem enviados para o elevador
+  xQueueMensagens = xQueueCreate(10, sizeof(int)); //Recebe as solicitacoes de andar - Nesse caso são inteiros de 0 a 15
   // Criando a tarefa
   xTaskCreate(
     SerialTask,   // Função da tarefa
@@ -305,14 +372,16 @@ void setup() {
     1,                 // Prioridade da tarefa
     &task2Handle               // Handle da tarefa
   );
-  /***xTaskCreate(
+  
+  xTaskCreate(
     CommandTask,   // Função da tarefa
-    "Read Serial Task", // Nome da tarefa
+    "Envia comandos", // Nome da tarefa
     2048,              // Tamanho da stack da tarefa
     NULL,              // Parâmetro da tarefa
     1,                 // Prioridade da tarefa
     NULL               // Handle da tarefa
-  );***/
+  );
+   
 }
 
 void loop() {
