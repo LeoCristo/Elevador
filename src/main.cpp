@@ -39,6 +39,10 @@ QueueHandle_t xQueueRx;
 QueueHandle_t xQueueTx;
 QueueHandle_t xQueueMensagens;
 
+// Mutex para acesso da requisicao de andar
+SemaphoreHandle_t xMutexRequisicaoAndar;
+
+
 //Status da porta 
 #define FECHADA 0
 #define ABERTA 1
@@ -66,8 +70,15 @@ int volatile statusElevador = PARADO;
 #define SEM_REQUISICAO 1
 #define EM_ANDAMENTO 0
 
+// Indica se alguma requisicao de andar esta sendo tratada, utilizada pela task 3
+static int requisicaoAndar = SEM_REQUISICAO; // Váriavel de controle das requisições de andar
+
+
 //Andar atual do elevador
 volatile static int andarAtual = 0; 
+
+//Andar solicitado externamente ou internamente na cabine
+volatile static int andarSolicitado;
 
 void SerialTask(void *parameter) {
 
@@ -293,55 +304,96 @@ void SendElevatorCommandTask(void *parameter){
 
 void CommandTask(void *parameter){
   //Recebera as solicitações do elevador em andares. Ex 0,1,2,...,15
-  int andarSolicitado;
+  int andarSolicitado1;
   char *sendCommand1;
-  char *sendCommand2; //= (char *)pvPortMalloc(10 * sizeof(char));
-  char *sendCommand3; //= (char *)pvPortMalloc(10 * sizeof(char));
+  char *sendCommand2; 
+  char *sendCommand3; 
   int difAndar;
 
-  static int RequisiçãoAndar = SEM_REQUISICAO; // Váriavel de controle das requisições de andar
                                                // Só podemos atender uma nova requisição de andar, se a última foi finalizada
+                                               // E, em consequência disso, não podemos pegar a requisição da fila xQueueMensagens
 
   while(true){
-
-    sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
-    sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
-    sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
-
-    if (xQueueReceive(xQueueMensagens, &andarSolicitado, portMAX_DELAY) == pdPASS){
-        Serial.printf("andar %d",andarSolicitado);
-        difAndar = andarAtual - andarSolicitado;
-        if(difAndar<0){//Elevador deve fechar a porta e subir
-          strcpy(sendCommand1, "ef\r");
-          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
-          strcpy(sendCommand2, "es\r");
-          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
-        }
-        if(difAndar>0){//Elevador deve fehcar a porta e descer
-          strcpy(sendCommand1, "ef\r");
-          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
-          strcpy(sendCommand2, "ed\r");
-          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
-        }
-        if(difAndar == 0){//Elevador deve parar, abrir a porta e fechar
-          strcpy(sendCommand1, "ep\r");
-          xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
-          strcpy(sendCommand2, "ea\r");
-          xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
-          strcpy(sendCommand3, "ef\r");
-          xQueueSend(xQueueTx, &sendCommand3, portMAX_DELAY);
-        }
-        // Envia para a fila
-        //xQueueSend(xQueueTx, &sendCommand, portMAX_DELAY);
-        
-    }
+    //Só pega requisição da fila, se o elevador for parado
     
+    if (xSemaphoreTake(xMutexRequisicaoAndar, portMAX_DELAY) == pdTRUE) {
+      if(requisicaoAndar == SEM_REQUISICAO){ 
+        if (xQueueReceive(xQueueMensagens, &andarSolicitado1, portMAX_DELAY) == pdPASS){
+          andarSolicitado = andarSolicitado1;
+            Serial.printf("andar %d",andarSolicitado1);
+            difAndar = andarAtual - andarSolicitado1;
+            if(difAndar == 0){
+              sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
+              sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
+              sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
+            //Elevador deve parar, abrir a porta e fechar
+              strcpy(sendCommand1, "ep\r");
+              xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+              strcpy(sendCommand2, "ea\r");
+              xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+              strcpy(sendCommand3, "ef\r");
+              xQueueSend(xQueueTx, &sendCommand3, portMAX_DELAY);
+              requisicaoAndar = SEM_REQUISICAO; 
+              
+            }else{
+              sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
+              sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
+              if(difAndar<0){//Elevador deve fechar a porta e subir
+                strcpy(sendCommand1, "ef\r");
+                xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+                strcpy(sendCommand2, "es\r");
+                xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+                requisicaoAndar = EM_ANDAMENTO;
+              }
+              if(difAndar>0){//Elevador deve fehcar a porta e descer
+                strcpy(sendCommand1, "ef\r");
+                xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+                strcpy(sendCommand2, "ed\r");
+                xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+                requisicaoAndar = EM_ANDAMENTO;
+              }
+            }
+        }
+      
+      }
+    // Libera o mutex
+    xSemaphoreGive(xMutexRequisicaoAndar);
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS); // Delay para evitar consumir muito processamento
+
   }
 
  
 }
 
+void stopTask(void *parameter){
+  char *sendCommand1;
+  char *sendCommand2; 
+  char *sendCommand3; 
+  int difAndar;
+  while(true){
 
+    if (xSemaphoreTake(xMutexRequisicaoAndar, portMAX_DELAY) == pdTRUE) {
+      difAndar = andarAtual - andarSolicitado;
+      if(difAndar == 0){
+        sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
+        sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
+        sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
+      //Elevador deve parar, abrir a porta e fechar
+        strcpy(sendCommand1, "ep\r");
+        xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
+        strcpy(sendCommand2, "ea\r");
+        xQueueSend(xQueueTx, &sendCommand2, portMAX_DELAY);
+        strcpy(sendCommand3, "ef\r");
+        xQueueSend(xQueueTx, &sendCommand3, portMAX_DELAY);
+        requisicaoAndar = SEM_REQUISICAO; 
+      }
+    // Libera o mutex
+    xSemaphoreGive(xMutexRequisicaoAndar);
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS); // Delay para evitar consumir muito processamento
+  }
+}
 
 void setup() {
   // Inicializando a Serial
@@ -355,6 +407,11 @@ void setup() {
   xQueueRx = xQueueCreate(10, sizeof(char *)); //Recebe as mensagens do elevador, tais como andar atual, solicitação de andar, status da porta
   xQueueTx = xQueueCreate(10, sizeof(char *)); //Recebe os comandos a serem enviados para o elevador
   xQueueMensagens = xQueueCreate(10, sizeof(int)); //Recebe as solicitacoes de andar - Nesse caso são inteiros de 0 a 15
+
+  //Mutex
+  // Cria o mutex da requisicao andar, duas tasks acessam essa variavel, task 3 e task 4
+  xMutexRequisicaoAndar = xSemaphoreCreateMutex();
+
   // Criando a tarefa
   xTaskCreate(
     SerialTask,   // Função da tarefa
@@ -376,12 +433,19 @@ void setup() {
   xTaskCreate(
     CommandTask,   // Função da tarefa
     "Envia comandos", // Nome da tarefa
+    4096,              // Tamanho da stack da tarefa
+    NULL,              // Parâmetro da tarefa
+    1,                 // Prioridade da tarefa
+    NULL               // Handle da tarefa
+  );
+  xTaskCreate(
+    stopTask,   // Função da tarefa
+    "Para o elevador", // Nome da tarefa
     2048,              // Tamanho da stack da tarefa
     NULL,              // Parâmetro da tarefa
     1,                 // Prioridade da tarefa
     NULL               // Handle da tarefa
   );
-   
 }
 
 void loop() {
