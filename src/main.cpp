@@ -62,7 +62,7 @@ int volatile statusElevador = PARADO;
 #define BTN_INTERNO 2
 #define STATUS_ANDAR 3
 #define STATUS_PORTA 4
-
+#define UNDEFINED 10
 //Status chamando Andar
 #define NAO_CHAMANDO -1
 
@@ -80,6 +80,9 @@ volatile static int andarAtual = 0;
 //Andar solicitado externamente ou internamente na cabine
 volatile static int andarSolicitado;
 
+/***
+ * Recebe dados da serial e envia dados para o elevado a pedido da task de comandos
+ * ***/
 void SerialTask(void *parameter) {
 
   //char buffer[MAX_COMMAND_LENGTH];
@@ -88,7 +91,7 @@ void SerialTask(void *parameter) {
     if (Serial.available() > 0) {
       //Lê até encontrar o LF
       // Aloca memória para uma string
-      char *buffer = (char *)pvPortMalloc(10 * sizeof(char));
+      char *buffer = (char *)pvPortMalloc(30 * sizeof(char));
       String receivedData = Serial.readStringUntil('\n');
       // Copia a string para a memória alocada
       // transforma o comando recebido em padrão C e  copia para o buffer alocado
@@ -110,7 +113,9 @@ void SerialTask(void *parameter) {
     {
             // Envia o comando
             Serial.printf("%s", sendCommand);//o <CR> já vem do comando na fila
-
+            if(strcmp(sendCommand,"ef\r") == 0 || strcmp(sendCommand,"ea\r") == 0){
+              vTaskDelay(700 / portTICK_PERIOD_MS);
+            }
             // Libera a memória da string recebida
             free(sendCommand);
     }
@@ -119,7 +124,11 @@ void SerialTask(void *parameter) {
   }
 
 }
-
+/***
+ *  Pega as mensagens recebidas da task da serial
+ *  e envia requisições de andar para a task de comando
+ *  também atualiza o estado do andar atual
+ * ***/
 void SendElevatorCommandTask(void *parameter){
 
   char *receivedCommand;
@@ -130,35 +139,6 @@ void SendElevatorCommandTask(void *parameter){
     // Recebe o ponteiro da fila
     if (xQueueReceive(xQueueRx, &receivedCommand, portMAX_DELAY) == pdPASS)
     {
-        // Processa o comando
-        //Serial.printf("Processing command: %s\n", receivedCommand);
-        /*** 
-        // Verificando o tipo de mensagem
-        if(strlen(receivedCommand) == 4 && receivedCommand[1] == 'I'){
-          //Se o tamanho da string for 4 e for da forma <elevador = e>I<andar = a ... p><CR> ->Obs.: A captura ira armazenadar <CR> também
-          //Então é uma requisição de andar, pode ser a = Térreo ou b = 1 ... até p =15
-        }
-        if(strlen(receivedCommand) == 4 && receivedCommand[1] != 'I'){
-          //Se o tamanho da string for 4 e for da forma <elevador = e><andar = 10 a 15><CR> ->Obs.: A captura ira armazenadar <CR> também
-          //Então é o andar atual, com 4 caracteres poder ser de e10<CR> a e15<CR>
-        }
-
-        if(strlen(receivedCommand) == 3){
-        //Se o tamanho da string for 3 e for da forma <elevador = e><andar = 0 a 9><CR> ->Obs.: A captura ira armazenadar <CR> também
-        //Então é o andar atual, com 3 caracteres poder ser de e0<CR> a e9<CR>
-          if(receivedCommand[1] == 'F' || receivedCommand[1] == 'A'){
-            //Se for na forma <andar><F>. Então as portas estão fechadas
-            //Se for na forma <andar><A>. Então as portas estão abertas
-        }
-        if(strlen(receivedCommand) == 6 && receivedCommand[1] == 'E'){
-          //Se o tamanho da string for 6 e for da forma <elevador>E<andar_dezena><andar_unidade><direção do botâo><CR> ->Obs.: A captura ira armazenadar <CR> também
-          //<andar_dezena><andar_unidade> = 00 a 15
-          //<direção do botâo> = s -> Sobe ou <direção do botâo> = d -> Desce
-
-        }
-
-        ***/
-
         int tamanahoComando = strlen(receivedCommand);
         //char *sendCommand = (char *)pvPortMalloc(10 * sizeof(char));
         int sendAndar; //Andar solicitado, tanto externamente ou internamente na cabine
@@ -167,7 +147,7 @@ void SendElevatorCommandTask(void *parameter){
         //volatile static int andarAtual = 0; // Andar atual do elevador
         int porta; //Status da porta, pode estar fechada ou aberta
         volatile static int andarChamandoElevador = -1; // Andar em que alguém está requisitando o elevador para subir ou descer
-        int tipoMensagem; //Tipo da mensagem recebida, possibilidades -> botao de subida/descida pressionadao (Ex>eE10s)->Botão interno pressionado(Ex>eIa)
+        int tipoMensagem = UNDEFINED; //Tipo da mensagem recebida, possibilidades -> botao de subida/descida pressionadao (Ex>eE10s)->Botão interno pressionado(Ex>eIa)
                                                       //              -> Andar atual do elevador              (Ex>e10)
                                                       //              -> Status da porta                      (Ex>eF ou eA)
         switch(tamanahoComando){
@@ -215,64 +195,10 @@ void SendElevatorCommandTask(void *parameter){
               /* PASS */
               break;
             case STATUS_ANDAR:
-              /* 
-              if(andarChamandoElevador != NAO_CHAMANDO){
-                difAndar =  andarAtual - andarChamandoElevador;//Quantidade de andares faltantes
-                Serial.printf("andarAtual %i andarChamandoElevador %i \n", andarAtual, andarChamandoElevador);
-                Serial.printf("dif %i \n",difAndar);
-                if(difAndar == 0){
-                  //Enviar comando de parada
-                  strcpy(sendCommand, "er\r");
-                  andarChamandoElevador = NAO_CHAMANDO;
-                  statusElevador = PARADO;
-                }else{
-                  if(difAndar>0){
-                    //Enviar comando de descida se o elevador não estiver descendo
-                    if(statusElevador != DESCENDO){
-                      strcpy(sendCommand, "ed\r");
-                      statusElevador = DESCENDO;
-                    }
-                  }
-                  if(difAndar<0){
-                    //Enviar comando de subida se o elevador não estiver subindo
-                    if(statusElevador != SUBINDO){
-                      strcpy(sendCommand, "es\r");
-                      statusElevador = SUBINDO;
-                    }
-                  }
-                }
-              }
-              */
-              
+      
               break;
             case BTN_SUBIDA:
-            /*
-               if(andarChamandoElevador != NAO_CHAMANDO){
-                difAndar =  andarAtual - andarChamandoElevador;//Quantidade de andares faltantes
-
-                if(difAndar == 0){
-                  //Enviar comando de parada
-                  strcpy(sendCommand, "er\r");
-                  andarChamandoElevador = NAO_CHAMANDO;
-                  statusElevador = PARADO;
-                }else{
-                  if(difAndar>0){
-                    //Enviar comando de descida se o elevador não estiver descendo
-                    if(statusElevador != DESCENDO){
-                      strcpy(sendCommand, "ed\r");
-                      statusElevador = DESCENDO;
-                    }
-                  }
-                  if(difAndar<0){
-                    //Enviar comando de subida se o elevador não estiver subindo
-                    if(statusElevador != SUBINDO){
-                      strcpy(sendCommand, "es\r");
-                      statusElevador = SUBINDO;
-                    }
-                  }
-                }
-              }
-              */
+         
               if(andarChamandoElevador != NAO_CHAMANDO){
                 sendAndar = andarChamandoElevador;
                 andarChamandoElevador = NAO_CHAMANDO;
@@ -297,11 +223,17 @@ void SendElevatorCommandTask(void *parameter){
         }
         
         // Libera a memória da string recebida da task 1
-        free(receivedCommand);
+      free(receivedCommand);
       }
   }
 }
 
+/***
+ * Recebe as requisições de andar
+ * Ao pegar uma requisição de andar, Verifica se deve subir, descer ou parar
+ * Ao pegar uma requisição de andar, outra requisição é pega apenas quando o elevador parar
+ * ou seja, uma requisição por vez é atendida da fila
+ * ***/
 void CommandTask(void *parameter){
   //Recebera as solicitações do elevador em andares. Ex 0,1,2,...,15
   int andarSolicitado1;
@@ -310,22 +242,18 @@ void CommandTask(void *parameter){
   char *sendCommand3; 
   int difAndar;
 
-                                               // Só podemos atender uma nova requisição de andar, se a última foi finalizada
-                                               // E, em consequência disso, não podemos pegar a requisição da fila xQueueMensagens
-
   while(true){
     //Só pega requisição da fila, se o elevador for parado
-    
+    //initialized<CR><LF>
     if (xSemaphoreTake(xMutexRequisicaoAndar, portMAX_DELAY) == pdTRUE) {
       if(requisicaoAndar == SEM_REQUISICAO){ 
         if (xQueueReceive(xQueueMensagens, &andarSolicitado1, portMAX_DELAY) == pdPASS){
-          andarSolicitado = andarSolicitado1;
-            Serial.printf("andar %d",andarSolicitado1);
+            andarSolicitado = andarSolicitado1;
             difAndar = andarAtual - andarSolicitado1;
             if(difAndar == 0){
-              sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
-              sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
-              sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
+              sendCommand1 = (char *)pvPortMalloc(30 * sizeof(char));
+              sendCommand2 = (char *)pvPortMalloc(30 * sizeof(char));
+              sendCommand3 = (char *)pvPortMalloc(30 * sizeof(char));
             //Elevador deve parar, abrir a porta e fechar
               strcpy(sendCommand1, "ep\r");
               xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
@@ -336,8 +264,8 @@ void CommandTask(void *parameter){
               requisicaoAndar = SEM_REQUISICAO; 
               
             }else{
-              sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
-              sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
+              sendCommand1 = (char *)pvPortMalloc(30 * sizeof(char));
+              sendCommand2 = (char *)pvPortMalloc(30 * sizeof(char));
               if(difAndar<0){//Elevador deve fechar a porta e subir
                 strcpy(sendCommand1, "ef\r");
                 xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
@@ -362,10 +290,12 @@ void CommandTask(void *parameter){
     vTaskDelay(10 / portTICK_PERIOD_MS); // Delay para evitar consumir muito processamento
 
   }
-
- 
 }
 
+/***
+ * Verifica se o andar solicitado foi atingido
+ * E envia comandos para parar, abrir porta e fechar
+ * ***/
 void stopTask(void *parameter){
   char *sendCommand1;
   char *sendCommand2; 
@@ -376,9 +306,9 @@ void stopTask(void *parameter){
     if (xSemaphoreTake(xMutexRequisicaoAndar, portMAX_DELAY) == pdTRUE) {
       difAndar = andarAtual - andarSolicitado;
       if(difAndar == 0){
-        sendCommand1 = (char *)pvPortMalloc(10 * sizeof(char));
-        sendCommand2 = (char *)pvPortMalloc(10 * sizeof(char));
-        sendCommand3 = (char *)pvPortMalloc(10 * sizeof(char));
+        sendCommand1 = (char *)pvPortMalloc(30 * sizeof(char));
+        sendCommand2 = (char *)pvPortMalloc(30 * sizeof(char));
+        sendCommand3 = (char *)pvPortMalloc(30 * sizeof(char));
       //Elevador deve parar, abrir a porta e fechar
         strcpy(sendCommand1, "ep\r");
         xQueueSend(xQueueTx, &sendCommand1, portMAX_DELAY);
